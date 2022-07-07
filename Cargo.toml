@@ -6,10 +6,10 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.56"
 solana-transaction-status = "1.9.13"
-solana-client = "1.9.13"
-solana-sdk = "1.9.13"
+solana-client = "1.10.12"
+solana-sdk = "1.10.12"
 reqwest = "0.11.11"
-tokio = { version = "1.19.2", features = ["full"] }
+tokio = { version = "1.14.1", features = ["full"] }
 tracing = "0.1.35"
 tracing-subscriber = "0.3.11"
 
