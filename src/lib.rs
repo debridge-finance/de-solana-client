@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use reqwest::StatusCode;
 pub use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{client_error::ClientError, rpc_request::RpcError};
 pub use solana_sdk::{
@@ -149,7 +150,7 @@ impl AsyncSendTransaction for RpcClient {
                     );
                     break Ok((signature, status));
                 }
-                Err(err) if send_ctx.ignorable_errors_count == 0 => {
+                Err(err) if send_ctx.ignorable_errors_count == 0 || !err.can_resend() => {
                     tracing::error!(
                         "Error via status request of {} transaction: {:?}",
                         signature,
@@ -205,5 +206,35 @@ impl AsyncSendTransactionWithSimpleStatus for RpcClient {
         )
         .await
         .map(|(signature, result_with_status)| (signature, result_with_status.err()))
+    }
+}
+
+pub trait CheckError {
+    fn can_resend(&self) -> bool;
+}
+use solana_client::client_error::ClientErrorKind;
+impl CheckError for ClientError {
+    fn can_resend(&self) -> bool {
+        matches!( self,  ClientError {
+                 kind: ClientErrorKind::Custom(code),
+                 ..
+             } if code.eq("503")
+        ) || matches!( self,  ClientError {
+                    kind:
+                        ClientErrorKind::RpcError(solana_client::rpc_request::RpcError::ForUser(
+                            message,
+                        )),
+                    ..
+                } if message.contains(
+            "unable to confirm transaction. \
+                                This can happen in situations such as \
+                                transaction expiration and insufficient fee-payer funds",
+        )
+        ) || matches!( self,  ClientError {
+                    kind: ClientErrorKind::Reqwest(error),
+                    ..
+                } if error.status().eq(&Some(
+            StatusCode::from_u16(503).expect("Unreachable. Const code."),
+        )))
     }
 }
