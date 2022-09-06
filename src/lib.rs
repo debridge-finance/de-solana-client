@@ -7,6 +7,7 @@ use std::{
 use async_trait::async_trait;
 pub use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{client_error::ClientError, rpc_request::RpcError};
+use solana_sdk::hash::Hash;
 pub use solana_sdk::{
     self,
     commitment_config::CommitmentConfig,
@@ -15,14 +16,6 @@ pub use solana_sdk::{
 };
 use tokio::time;
 use tracing::Level;
-
-pub mod ws {
-    pub use solana_client::nonblocking::rpc_client::RpcClient;
-
-    fn subscribe(url: &str) -> Result<(), ()> {
-        todo!()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SendContext {
@@ -44,6 +37,8 @@ impl Default for SendContext {
 
 #[async_trait]
 pub trait AsyncSendTransaction {
+    async fn get_latest_blockhash(&self) -> Result<Hash, ClientError>;
+
     async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
         transaction: Transaction,
@@ -55,13 +50,7 @@ pub trait AsyncSendTransaction {
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>;
 
-    async fn resend_transaction_with_custom_expectant<
-        TransactionBuilder,
-        Expecter,
-        Fut,
-        TxStatus,
-        TxFuture,
-    >(
+    async fn resend_transaction_with_custom_expectant<TransactionBuilder, Expecter, Fut, TxStatus>(
         &self,
         transaction_builder: TransactionBuilder,
         expectant: &Expecter,
@@ -70,13 +59,12 @@ pub trait AsyncSendTransaction {
     ) -> Result<(Signature, TxStatus), ClientError>
     where
         Expecter: Send + Sync + Fn(Signature) -> Fut,
-        TransactionBuilder: Send + Sync + Fn() -> TxFuture,
-        TxFuture: Send + Sync + Future<Output = Result<Transaction, ClientError>>,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
     {
         loop {
-            let tx = transaction_builder().await?;
+            let tx = transaction_builder(self.get_latest_blockhash().await?);
 
             match self
                 .send_transaction_with_custom_expectant::<Expecter, Fut, TxStatus>(
@@ -104,6 +92,10 @@ pub trait AsyncSendTransaction {
 
 #[async_trait]
 impl AsyncSendTransaction for RpcClient {
+    async fn get_latest_blockhash(&self) -> Result<Hash, ClientError> {
+        self.get_latest_blockhash().await
+    }
+
     async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
         transaction: Transaction,
@@ -236,28 +228,26 @@ impl AsyncSendTransactionWithSimpleStatus for RpcClient {
 }
 #[async_trait]
 pub trait AsyncResendTransactionWithSimpleStatus: AsyncSendTransaction {
-    async fn resend_transaction_with_simple_status<TransactionBuilder, TxFuture>(
+    async fn resend_transaction_with_simple_status<TransactionBuilder>(
         &self,
         transaction_builder: TransactionBuilder,
         send_ctx: SendContext,
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
-        TransactionBuilder: Send + Sync + Fn() -> TxFuture,
-        TxFuture: Send + Sync + Future<Output = Result<Transaction, ClientError>>;
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction;
 }
 
 #[async_trait]
 impl AsyncResendTransactionWithSimpleStatus for RpcClient {
-    async fn resend_transaction_with_simple_status<TransactionBuilder, TxFuture>(
+    async fn resend_transaction_with_simple_status<TransactionBuilder>(
         &self,
         transaction_builder: TransactionBuilder,
         send_ctx: SendContext,
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
-        TransactionBuilder: Send + Sync + Fn() -> TxFuture,
-        TxFuture: Send + Sync + Future<Output = Result<Transaction, ClientError>>,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
     {
         self.resend_transaction_with_custom_expectant(
             transaction_builder,
