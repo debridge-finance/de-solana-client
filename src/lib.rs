@@ -9,6 +9,7 @@ use base58::ToBase58;
 pub use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{
     client_error::ClientError,
+    rpc_client::GetConfirmedSignaturesForAddress2Config,
     rpc_filter::{Memcmp, RpcFilterType},
     rpc_request::RpcError,
 };
@@ -315,5 +316,78 @@ impl GetProgramAccountsWithBytes for RpcClient {
                 },
             )
             .await?)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    ClientError(#[from] ClientError),
+    #[error(transparent)]
+    SignatureParseError(#[from] solana_sdk::signature::ParseSignatureError),
+}
+
+#[async_trait]
+pub trait GetTransactionsSignaturesForAddress {
+    async fn get_signatures_for_address_with_config(
+        &self,
+        address: &Pubkey,
+        commitment_config: CommitmentConfig,
+        until: Option<Signature>,
+    ) -> Result<Vec<Signature>, Error>;
+}
+
+#[async_trait]
+impl GetTransactionsSignaturesForAddress for RpcClient {
+    async fn get_signatures_for_address_with_config(
+        &self,
+        address: &Pubkey,
+        commitment_config: CommitmentConfig,
+        until: Option<Signature>,
+    ) -> Result<Vec<Signature>, Error> {
+        let mut all_signatures = vec![];
+        let mut before = None;
+
+        loop {
+            tracing::trace!(
+                "Request signature batch, before: {:?}, until: {:?}",
+                before,
+                until
+            );
+
+            let signatures_batch = self
+                .get_signatures_for_address_with_config(
+                    address,
+                    GetConfirmedSignaturesForAddress2Config {
+                        before,
+                        until,
+                        limit: None,
+                        commitment: Some(commitment_config),
+                    },
+                )
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        "Error while get signature for address with config: {:?}",
+                        err
+                    );
+                    err
+                })?
+                .into_iter()
+                .filter(|tx| tx.err.is_none())
+                .map(|tx| Ok(tx.signature.parse()?))
+                .collect::<Result<Vec<_>, Error>>()?;
+
+            if signatures_batch.is_empty() {
+                break;
+            }
+
+            before = signatures_batch.last().copied();
+
+            all_signatures = [signatures_batch, all_signatures].concat();
+        }
+        all_signatures.reverse();
+
+        Ok(all_signatures)
     }
 }
