@@ -5,12 +5,19 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base58::ToBase58;
 pub use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::{client_error::ClientError, rpc_request::RpcError};
+use solana_client::{
+    client_error::ClientError,
+    rpc_filter::{Memcmp, RpcFilterType},
+    rpc_request::RpcError,
+};
 use solana_sdk::hash::Hash;
 pub use solana_sdk::{
     self,
+    account::Account,
     commitment_config::CommitmentConfig,
+    pubkey::Pubkey,
     signature::Signature,
     transaction::{Transaction, TransactionError},
 };
@@ -259,5 +266,54 @@ impl AsyncResendTransactionWithSimpleStatus for RpcClient {
         )
         .await
         .map(|(signature, result_with_status)| (signature, result_with_status.err()))
+    }
+}
+
+pub struct Memory {
+    pub offset: usize,
+    pub bytes: Vec<u8>,
+}
+impl From<Memory> for RpcFilterType {
+    fn from(mem: Memory) -> RpcFilterType {
+        RpcFilterType::Memcmp(Memcmp {
+            offset: mem.offset,
+            bytes: solana_client::rpc_filter::MemcmpEncodedBytes::Base58(mem.bytes.to_base58()),
+            encoding: None,
+        })
+    }
+}
+
+#[async_trait]
+pub trait GetProgramAccountsWithBytes {
+    async fn get_program_accounts_with_bytes(
+        &self,
+        program: &Pubkey,
+        bytes: Vec<Memory>,
+    ) -> Result<Vec<(Pubkey, Account)>, ClientError>;
+}
+
+use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
+
+#[async_trait]
+impl GetProgramAccountsWithBytes for RpcClient {
+    async fn get_program_accounts_with_bytes(
+        &self,
+        program_id: &Pubkey,
+        bytes: Vec<Memory>,
+    ) -> Result<Vec<(Pubkey, Account)>, ClientError> {
+        use solana_account_decoder::*;
+        Ok(self
+            .get_program_accounts_with_config(
+                program_id,
+                RpcProgramAccountsConfig {
+                    filters: Some(bytes.into_iter().map(RpcFilterType::from).collect()),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        ..Default::default()
+                    },
+                    with_context: None,
+                },
+            )
+            .await?)
     }
 }
