@@ -37,7 +37,7 @@ async fn main() {
         "Transaction with signature {signature} {status}",
         signature = signature,
         status = match status {
-            Some(err) => format!("sent with error {:?}", err),
+            Some(err) => format!("sent with error {err:?}"),
             None => "sent and confirmed".to_owned(),
         }
     );

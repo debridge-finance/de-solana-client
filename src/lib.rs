@@ -13,7 +13,6 @@ use solana_client::{
     rpc_filter::{Memcmp, RpcFilterType},
     rpc_request::RpcError,
 };
-use solana_sdk::hash::Hash;
 pub use solana_sdk::{
     self,
     account::Account,
@@ -22,6 +21,7 @@ pub use solana_sdk::{
     signature::Signature,
     transaction::{Transaction, TransactionError},
 };
+use solana_sdk::{clock::UnixTimestamp, hash::Hash};
 use tokio::time;
 use tracing::Level;
 
@@ -137,8 +137,7 @@ impl AsyncSendTransaction for RpcClient {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(RpcError::ForUser(format!(
-                        "Transaction {:?} blockhash not found by rpc",
-                        transaction
+                        "Transaction {transaction:?} blockhash not found by rpc",
                     ))
                     .into())
                 }
@@ -150,8 +149,7 @@ impl AsyncSendTransaction for RpcClient {
                         send_ctx.ignorable_errors_count
                     );
                     return Err(RpcError::ForUser(format!(
-                        "Error via transaction {:?} blockhash requesting",
-                        transaction
+                        "Error via transaction {transaction:?} blockhash requesting",
                     ))
                     .into());
                 }
@@ -197,8 +195,7 @@ impl AsyncSendTransaction for RpcClient {
 
             if send_ctx.confirm_duration < instant.elapsed() {
                 break Err(RpcError::ForUser(format!(
-                    "Unable to confirm transaction {}.",
-                    signature
+                    "Unable to confirm transaction {signature}.",
                 ))
                 .into());
             }
@@ -276,6 +273,7 @@ pub struct Memory {
 }
 impl From<Memory> for RpcFilterType {
     fn from(mem: Memory) -> RpcFilterType {
+        #[allow(deprecated)]
         RpcFilterType::Memcmp(Memcmp {
             offset: mem.offset,
             bytes: solana_client::rpc_filter::MemcmpEncodedBytes::Base58(mem.bytes.to_base58()),
@@ -327,6 +325,13 @@ pub enum Error {
     SignatureParseError(#[from] solana_sdk::signature::ParseSignatureError),
 }
 
+#[derive(Debug, Clone)]
+pub struct SignaturesData {
+    pub signature: Signature,
+    pub slot: u64,
+    pub block_time: Option<UnixTimestamp>,
+}
+
 #[async_trait]
 pub trait GetTransactionsSignaturesForAddress {
     async fn get_signatures_for_address_with_config(
@@ -334,17 +339,30 @@ pub trait GetTransactionsSignaturesForAddress {
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<Signature>, Error>;
-}
-
-#[async_trait]
-impl GetTransactionsSignaturesForAddress for RpcClient {
-    async fn get_signatures_for_address_with_config(
+    ) -> Result<Vec<Signature>, Error> {
+        Ok(self
+            .get_signatures_data_for_address_with_config(address, commitment_config, until)
+            .await?
+            .into_iter()
+            .map(|data| data.signature)
+            .collect())
+    }
+    async fn get_signatures_data_for_address_with_config(
         &self,
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<Signature>, Error> {
+    ) -> Result<Vec<SignaturesData>, Error>;
+}
+
+#[async_trait]
+impl GetTransactionsSignaturesForAddress for RpcClient {
+    async fn get_signatures_data_for_address_with_config(
+        &self,
+        address: &Pubkey,
+        commitment_config: CommitmentConfig,
+        until: Option<Signature>,
+    ) -> Result<Vec<SignaturesData>, Error> {
         let mut all_signatures = vec![];
         let mut before = None;
 
@@ -375,14 +393,20 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                 })?
                 .into_iter()
                 .filter(|tx| tx.err.is_none())
-                .map(|tx| Ok(tx.signature.parse()?))
+                .map(|tx| {
+                    Ok(SignaturesData {
+                        signature: tx.signature.parse()?,
+                        slot: tx.slot,
+                        block_time: tx.block_time,
+                    })
+                })
                 .collect::<Result<Vec<_>, Error>>()?;
 
             if signatures_batch.is_empty() {
                 break;
             }
 
-            before = signatures_batch.last().copied();
+            before = signatures_batch.last().map(|d| d.signature);
 
             all_signatures = [signatures_batch, all_signatures].concat();
         }
