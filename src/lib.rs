@@ -330,6 +330,7 @@ pub struct SignaturesData {
     pub signature: Signature,
     pub slot: u64,
     pub block_time: Option<UnixTimestamp>,
+    pub err: Option<TransactionError>,
 }
 
 #[async_trait]
@@ -344,6 +345,7 @@ pub trait GetTransactionsSignaturesForAddress {
             .get_signatures_data_for_address_with_config(address, commitment_config, until)
             .await?
             .into_iter()
+            .filter(|data| data.err.is_none())
             .map(|data| data.signature)
             .collect())
     }
@@ -379,7 +381,7 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                     GetConfirmedSignaturesForAddress2Config {
                         before,
                         until,
-                        limit: None,
+                        limit: Some(1000),
                         commitment: Some(commitment_config),
                     },
                 )
@@ -392,12 +394,12 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                     err
                 })?
                 .into_iter()
-                .filter(|tx| tx.err.is_none())
                 .map(|tx| {
                     Ok(SignaturesData {
                         signature: tx.signature.parse()?,
                         slot: tx.slot,
                         block_time: tx.block_time,
+                        err: tx.err,
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
