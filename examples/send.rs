@@ -24,7 +24,6 @@ async fn main() {
         )
         .await
         .unwrap();
-    signatures.reverse();
 
     println!("{signatures:?}");
     println!("{}", signatures.len());

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt::Debug,
     future::Future,
     time::{Duration, Instant},
@@ -325,12 +326,30 @@ pub enum Error {
     SignatureParseError(#[from] solana_sdk::signature::ParseSignatureError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignaturesData {
     pub signature: Signature,
     pub slot: u64,
     pub block_time: Option<UnixTimestamp>,
     pub err: Option<TransactionError>,
+}
+impl PartialOrd for SignaturesData {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match self.slot.partial_cmp(&other.slot) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.block_time.partial_cmp(&other.block_time) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.signature.partial_cmp(&other.signature)
+    }
+}
+impl Ord for SignaturesData {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
 
 #[async_trait]
@@ -354,7 +373,7 @@ pub trait GetTransactionsSignaturesForAddress {
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<SignaturesData>, Error>;
+    ) -> Result<BTreeSet<SignaturesData>, Error>;
 }
 
 #[async_trait]
@@ -364,8 +383,8 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<SignaturesData>, Error> {
-        let mut all_signatures = vec![];
+    ) -> Result<BTreeSet<SignaturesData>, Error> {
+        let mut all_signatures = BTreeSet::new();
         let mut before = None;
 
         loop {
@@ -408,11 +427,12 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                 break;
             }
 
-            before = signatures_batch.last().map(|d| d.signature);
+            before = signatures_batch.first().map(|d| d.signature);
 
-            all_signatures = [signatures_batch, all_signatures].concat();
+            signatures_batch.into_iter().for_each(|s| {
+                all_signatures.insert(s);
+            });
         }
-        all_signatures.reverse();
 
         Ok(all_signatures)
     }
