@@ -25,7 +25,7 @@ pub use solana_sdk::{
 };
 use solana_sdk::{clock::UnixTimestamp, hash::Hash};
 use tokio::time;
-use tracing::Level;
+use tracing::{Level, instrument};
 
 #[derive(Debug, Clone)]
 pub struct SendContext {
@@ -379,6 +379,7 @@ pub trait GetTransactionsSignaturesForAddress {
 
 #[async_trait]
 impl GetTransactionsSignaturesForAddress for RpcClient {
+    #[instrument(skip(self))]
     async fn get_signatures_data_for_address_with_config(
         &self,
         address: &Pubkey,
