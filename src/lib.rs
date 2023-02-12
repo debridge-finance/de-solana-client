@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use base58::ToBase58;
-use itertools::Itertools;
+use itertools::{FoldWhile, Itertools};
 pub use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{
     client_error::ClientError,
@@ -429,20 +429,40 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
             }
             tracing::trace!("Batch received: {}", signatures_batch.len());
 
-            before = signatures_batch.last().map(|d| d.signature);
+            before = signatures_batch
+                .iter()
+                .rev()
+                .fold_while(
+                    None,
+                    |resync_border_tx, signature_data| match resync_border_tx {
+                        None => FoldWhile::Continue(Some(signature_data)),
+                        Some(resync_border) => {
+                            if resync_border.slot != signature_data.slot {
+                                FoldWhile::Done(Some(resync_border))
+                            } else {
+                                FoldWhile::Continue(Some(resync_border))
+                            }
+                        }
+                    },
+                )
+                .into_inner()
+                .map(|d| d.signature);
 
-            let before_len = signatures_batch
+            let batch_len_before = signatures_batch
                 .iter()
                 .map(|b| b.slot)
                 .all_equal()
                 .then_some(all_signatures.len());
+
             signatures_batch.into_iter().for_each(|s| {
                 all_signatures.insert(s);
             });
-            if let Some(before_len) = before_len {
-                if all_signatures.len() == before_len {
-                    break;
-                }
+
+            if matches!(
+                batch_len_before,
+                Some(before_len) if before_len == all_signatures.len()
+            ) {
+                break;
             }
 
             tracing::trace!("All signatures: {}", all_signatures.len());
