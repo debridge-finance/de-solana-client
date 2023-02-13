@@ -1,6 +1,6 @@
 [package]
 name = "de-solana-client"
-version = "0.1.1"
+version = "0.3.2"
 edition = "2021"
 
 [dependencies]
@@ -15,6 +15,7 @@ solana-client = "1.14.7"
 solana-sdk = "1.14.7"
 base58 = "0.2.0"
 thiserror = "1.0.30"
+itertools = "0.10.5"
 
 [dev-dependencies]
 dirs = "4.0.0"

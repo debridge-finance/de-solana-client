@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt::Debug,
     future::Future,
     time::{Duration, Instant},
@@ -6,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use base58::ToBase58;
+use itertools::{FoldWhile, Itertools};
 pub use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{
     client_error::ClientError,
@@ -13,7 +15,6 @@ use solana_client::{
     rpc_filter::{Memcmp, RpcFilterType},
     rpc_request::RpcError,
 };
-use solana_sdk::hash::Hash;
 pub use solana_sdk::{
     self,
     account::Account,
@@ -22,8 +23,9 @@ pub use solana_sdk::{
     signature::Signature,
     transaction::{Transaction, TransactionError},
 };
+use solana_sdk::{clock::UnixTimestamp, hash::Hash};
 use tokio::time;
-use tracing::Level;
+use tracing::{instrument, Level};
 
 #[derive(Debug, Clone)]
 pub struct SendContext {
@@ -137,8 +139,7 @@ impl AsyncSendTransaction for RpcClient {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(RpcError::ForUser(format!(
-                        "Transaction {:?} blockhash not found by rpc",
-                        transaction
+                        "Transaction {transaction:?} blockhash not found by rpc",
                     ))
                     .into())
                 }
@@ -150,8 +151,7 @@ impl AsyncSendTransaction for RpcClient {
                         send_ctx.ignorable_errors_count
                     );
                     return Err(RpcError::ForUser(format!(
-                        "Error via transaction {:?} blockhash requesting",
-                        transaction
+                        "Error via transaction {transaction:?} blockhash requesting",
                     ))
                     .into());
                 }
@@ -197,8 +197,7 @@ impl AsyncSendTransaction for RpcClient {
 
             if send_ctx.confirm_duration < instant.elapsed() {
                 break Err(RpcError::ForUser(format!(
-                    "Unable to confirm transaction {}.",
-                    signature
+                    "Unable to confirm transaction {signature}.",
                 ))
                 .into());
             }
@@ -276,6 +275,7 @@ pub struct Memory {
 }
 impl From<Memory> for RpcFilterType {
     fn from(mem: Memory) -> RpcFilterType {
+        #[allow(deprecated)]
         RpcFilterType::Memcmp(Memcmp {
             offset: mem.offset,
             bytes: solana_client::rpc_filter::MemcmpEncodedBytes::Base58(mem.bytes.to_base58()),
@@ -327,6 +327,32 @@ pub enum Error {
     SignatureParseError(#[from] solana_sdk::signature::ParseSignatureError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignaturesData {
+    pub signature: Signature,
+    pub slot: u64,
+    pub block_time: Option<UnixTimestamp>,
+    pub err: Option<TransactionError>,
+}
+impl PartialOrd for SignaturesData {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match self.slot.partial_cmp(&other.slot) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.block_time.partial_cmp(&other.block_time) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.signature.partial_cmp(&other.signature)
+    }
+}
+impl Ord for SignaturesData {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
 #[async_trait]
 pub trait GetTransactionsSignaturesForAddress {
     async fn get_signatures_for_address_with_config(
@@ -334,18 +360,33 @@ pub trait GetTransactionsSignaturesForAddress {
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<Signature>, Error>;
-}
-
-#[async_trait]
-impl GetTransactionsSignaturesForAddress for RpcClient {
-    async fn get_signatures_for_address_with_config(
+    ) -> Result<Vec<Signature>, Error> {
+        Ok(self
+            .get_signatures_data_for_address_with_config(address, commitment_config, until)
+            .await?
+            .into_iter()
+            .filter(|data| data.err.is_none())
+            .map(|data| data.signature)
+            .collect())
+    }
+    async fn get_signatures_data_for_address_with_config(
         &self,
         address: &Pubkey,
         commitment_config: CommitmentConfig,
         until: Option<Signature>,
-    ) -> Result<Vec<Signature>, Error> {
-        let mut all_signatures = vec![];
+    ) -> Result<BTreeSet<SignaturesData>, Error>;
+}
+
+#[async_trait]
+impl GetTransactionsSignaturesForAddress for RpcClient {
+    #[instrument(skip(self))]
+    async fn get_signatures_data_for_address_with_config(
+        &self,
+        address: &Pubkey,
+        commitment_config: CommitmentConfig,
+        until: Option<Signature>,
+    ) -> Result<BTreeSet<SignaturesData>, Error> {
+        let mut all_signatures = BTreeSet::new();
         let mut before = None;
 
         loop {
@@ -361,7 +402,7 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                     GetConfirmedSignaturesForAddress2Config {
                         before,
                         until,
-                        limit: None,
+                        limit: Some(1000),
                         commitment: Some(commitment_config),
                     },
                 )
@@ -374,19 +415,59 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                     err
                 })?
                 .into_iter()
-                .filter(|tx| tx.err.is_none())
-                .map(|tx| Ok(tx.signature.parse()?))
+                .map(|tx| {
+                    Ok(SignaturesData {
+                        signature: tx.signature.parse()?,
+                        slot: tx.slot,
+                        block_time: tx.block_time,
+                        err: tx.err,
+                    })
+                })
                 .collect::<Result<Vec<_>, Error>>()?;
 
             if signatures_batch.is_empty() {
                 break;
             }
+            tracing::trace!("Batch received: {}", signatures_batch.len());
 
-            before = signatures_batch.last().copied();
+            before = signatures_batch
+                .iter()
+                .rev()
+                .fold_while(
+                    None,
+                    |resync_border_tx, signature_data| match resync_border_tx {
+                        None => FoldWhile::Continue(Some(signature_data)),
+                        Some(resync_border) => {
+                            if resync_border.slot != signature_data.slot {
+                                FoldWhile::Done(Some(signature_data))
+                            } else {
+                                FoldWhile::Continue(Some(resync_border))
+                            }
+                        }
+                    },
+                )
+                .into_inner()
+                .map(|d| d.signature);
 
-            all_signatures = [signatures_batch, all_signatures].concat();
+            let batch_len_before = signatures_batch
+                .iter()
+                .map(|b| b.slot)
+                .all_equal()
+                .then_some(all_signatures.len());
+
+            signatures_batch.into_iter().for_each(|s| {
+                all_signatures.insert(s);
+            });
+
+            if matches!(
+                batch_len_before,
+                Some(before_len) if before_len == all_signatures.len()
+            ) {
+                break;
+            }
+
+            tracing::trace!("All signatures: {}", all_signatures.len());
         }
-        all_signatures.reverse();
 
         Ok(all_signatures)
     }
