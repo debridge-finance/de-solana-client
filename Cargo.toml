@@ -2,6 +2,14 @@
 name = "de-solana-client"
 version = "0.3.2"
 edition = "2021"
+authors = [
+    "cyphersnake <cyphersnake@pm.me>",
+    "shinkarenko  <shinbogdan@gmail.com>",
+]
+description = "Provides various utilities for working with Solana blockchain RPC"
+publish = true
+keywords = ["solana", "anchor", "blockchain", "utilities"]
+license = "MIT"
 
 [dependencies]
 async-trait = "0.1.56"
