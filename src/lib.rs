@@ -346,7 +346,7 @@ impl Ord for SignaturesData {
             ord => return ord,
         }
         match self.block_time.cmp(&other.block_time) {
-           core::cmp::Ordering::Equal => {},
+            core::cmp::Ordering::Equal => {}
             ord => return ord,
         }
         self.signature.cmp(&other.signature)
@@ -455,6 +455,7 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
                 .all_equal()
                 .then_some(all_signatures.len());
 
+            let previous_len = all_signatures.len();
             signatures_batch.into_iter().for_each(|s| {
                 all_signatures.insert(s);
             });
@@ -465,7 +466,10 @@ impl GetTransactionsSignaturesForAddress for RpcClient {
             ) {
                 break;
             }
-
+            if previous_len == all_signatures.len() {
+                tracing::warn!("found infinity loop, from: {before:?}, to: {until:?}, returning `all_signatures` as is");
+                break;
+            }
             tracing::trace!("All signatures: {}", all_signatures.len());
         }
 
