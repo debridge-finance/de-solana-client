@@ -200,12 +200,12 @@ impl AsyncSendTransaction for RpcClient {
                 }
             }
         }
-        let signature = self
-            .send_transaction_with_config(&transaction, config)
-            .await?;
 
         let instant = Instant::now();
         loop {
+            let signature = self
+                .send_transaction_with_config(&transaction, config)
+                .await?;
             match expectant(signature).await {
                 Ok(None) => {
                     tracing::trace!(
