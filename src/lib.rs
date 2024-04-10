@@ -49,6 +49,18 @@ impl Default for SendContext {
 pub trait AsyncSendTransaction {
     async fn get_latest_blockhash(&self) -> Result<Hash, ClientError>;
 
+    async fn send_transaction_with_config_with_custom_expectant<Expecter, Fut, TxStatus>(
+        &self,
+        transaction: Transaction,
+        config: RpcSendTransactionConfig,
+        expectant: &Expecter,
+        send_ctx: SendContext,
+    ) -> Result<(Signature, TxStatus), ClientError>
+    where
+        Expecter: Send + Sync + Fn(Signature) -> Fut,
+        TxStatus: Debug + Send,
+        Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>;
+
     async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
         transaction: Transaction,
@@ -65,6 +77,35 @@ pub trait AsyncSendTransaction {
         transaction_builder: TransactionBuilder,
         expectant: &Expecter,
         send_ctx: SendContext,
+        resend_count: usize,
+    ) -> Result<(Signature, TxStatus), ClientError>
+    where
+        Expecter: Send + Sync + Fn(Signature) -> Fut,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+        TxStatus: Debug + Send,
+        Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
+    {
+        self.resend_transaction_with_config_with_custom_expectant(
+            transaction_builder,
+            Default::default(),
+            expectant,
+            send_ctx,
+            resend_count,
+        )
+        .await
+    }
+
+    async fn resend_transaction_with_config_with_custom_expectant<
+        TransactionBuilder,
+        Expecter,
+        Fut,
+        TxStatus,
+    >(
+        &self,
+        transaction_builder: TransactionBuilder,
+        config: RpcSendTransactionConfig,
+        expectant: &Expecter,
+        send_ctx: SendContext,
         mut resend_count: usize,
     ) -> Result<(Signature, TxStatus), ClientError>
     where
@@ -77,8 +118,9 @@ pub trait AsyncSendTransaction {
             let tx = transaction_builder(self.get_latest_blockhash().await?);
 
             match self
-                .send_transaction_with_custom_expectant::<Expecter, Fut, TxStatus>(
+                .send_transaction_with_config_with_custom_expectant::<Expecter, Fut, TxStatus>(
                     tx,
+                    config,
                     expectant,
                     send_ctx.clone(),
                 )
@@ -106,9 +148,10 @@ impl AsyncSendTransaction for RpcClient {
         self.get_latest_blockhash().await
     }
 
-    async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
+    async fn send_transaction_with_config_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
         transaction: Transaction,
+        config: RpcSendTransactionConfig,
         expectant: &Expecter,
         mut send_ctx: SendContext,
     ) -> Result<(Signature, TxStatus), ClientError>
@@ -157,10 +200,12 @@ impl AsyncSendTransaction for RpcClient {
                 }
             }
         }
-        let signature = self.send_transaction(&transaction).await?;
 
         let instant = Instant::now();
         loop {
+            let signature = self
+                .send_transaction_with_config(&transaction, config)
+                .await?;
             match expectant(signature).await {
                 Ok(None) => {
                     tracing::trace!(
@@ -204,6 +249,26 @@ impl AsyncSendTransaction for RpcClient {
             time::sleep(send_ctx.confirm_request_pause).await;
         }
     }
+
+    async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
+        &self,
+        transaction: Transaction,
+        expectant: &Expecter,
+        send_ctx: SendContext,
+    ) -> Result<(Signature, TxStatus), ClientError>
+    where
+        Expecter: Send + Sync + Fn(Signature) -> Fut,
+        TxStatus: Debug + Send,
+        Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
+    {
+        self.send_transaction_with_config_with_custom_expectant(
+            transaction,
+            Default::default(),
+            expectant,
+            send_ctx,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -212,41 +277,54 @@ pub trait AsyncSendTransactionWithSimpleStatus: AsyncSendTransaction {
         &self,
         transaction: Transaction,
         send_ctx: SendContext,
+    ) -> Result<(Signature, Option<TransactionError>), ClientError> {
+        self.send_transaction_with_config_with_simple_status(
+            transaction,
+            Default::default(),
+            send_ctx,
+        )
+        .await
+    }
+
+    async fn send_transaction_with_config_with_simple_status(
+        &self,
+        transaction: Transaction,
+        config: RpcSendTransactionConfig,
+        send_ctx: SendContext,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>;
 }
 
 #[async_trait]
 impl AsyncSendTransactionWithSimpleStatus for RpcClient {
-    async fn send_transaction_with_simple_status(
+    async fn send_transaction_with_config_with_simple_status(
         &self,
         transaction: Transaction,
+        config: RpcSendTransactionConfig,
         send_ctx: SendContext,
     ) -> Result<(Signature, Option<TransactionError>), ClientError> {
-        self.send_transaction_with_custom_expectant(
+        self.send_transaction_with_config_with_custom_expectant(
             transaction,
+            config,
             &|signature: Signature| async move {
                 self.get_signature_status(&signature.clone()).await
             },
             send_ctx,
         )
-        .await
-        .map(|(signature, result_with_status)| (signature, result_with_status.err()))
+            .await
+            .map(|(signature, result_with_status)| (signature, result_with_status.err()))
     }
 }
 #[async_trait]
 pub trait AsyncResendTransactionWithSimpleStatus: AsyncSendTransaction {
-    async fn resend_transaction_with_simple_status<TransactionBuilder>(
+    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder>(
         &self,
         transaction_builder: TransactionBuilder,
+        config: RpcSendTransactionConfig,
         send_ctx: SendContext,
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
         TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction;
-}
-
-#[async_trait]
-impl AsyncResendTransactionWithSimpleStatus for RpcClient {
     async fn resend_transaction_with_simple_status<TransactionBuilder>(
         &self,
         transaction_builder: TransactionBuilder,
@@ -256,16 +334,39 @@ impl AsyncResendTransactionWithSimpleStatus for RpcClient {
     where
         TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
     {
-        self.resend_transaction_with_custom_expectant(
+        self.resend_transaction_with_config_with_simple_status(
             transaction_builder,
+            Default::default(),
+            send_ctx,
+            resend_count,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl AsyncResendTransactionWithSimpleStatus for RpcClient {
+    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder>(
+        &self,
+        transaction_builder: TransactionBuilder,
+        config: RpcSendTransactionConfig,
+        send_ctx: SendContext,
+        resend_count: usize,
+    ) -> Result<(Signature, Option<TransactionError>), ClientError>
+    where
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+    {
+        self.resend_transaction_with_config_with_custom_expectant(
+            transaction_builder,
+            config,
             &|signature: Signature| async move {
                 self.get_signature_status(&signature.clone()).await
             },
             send_ctx,
             resend_count,
         )
-        .await
-        .map(|(signature, result_with_status)| (signature, result_with_status.err()))
+            .await
+            .map(|(signature, result_with_status)| (signature, result_with_status.err()))
     }
 }
 
@@ -293,7 +394,9 @@ pub trait GetProgramAccountsWithBytes {
     ) -> Result<Vec<(Pubkey, Account)>, ClientError>;
 }
 
-use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
+use solana_client::rpc_config::{
+    RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSendTransactionConfig,
+};
 
 #[async_trait]
 impl GetProgramAccountsWithBytes for RpcClient {
