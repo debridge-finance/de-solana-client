@@ -9,10 +9,9 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use itertools::{FoldWhile, Itertools};
 pub use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::SerializableTransaction;
 use solana_client::{
     client_error::ClientError,
-    rpc_client::GetConfirmedSignaturesForAddress2Config,
+    rpc_client::{GetConfirmedSignaturesForAddress2Config, SerializableTransaction},
     rpc_filter::{Memcmp, RpcFilterType},
     rpc_request::RpcError,
 };
@@ -73,7 +72,13 @@ pub trait AsyncSendTransaction {
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>;
 
-    async fn resend_transaction_with_custom_expectant<TransactionBuilder, Expecter, Fut, TxStatus>(
+    async fn resend_transaction_with_custom_expectant<
+        TransactionBuilder,
+        Expecter,
+        Fut,
+        TxStatus,
+        Tx,
+    >(
         &self,
         transaction_builder: TransactionBuilder,
         expectant: &Expecter,
@@ -82,9 +87,10 @@ pub trait AsyncSendTransaction {
     ) -> Result<(Signature, TxStatus), ClientError>
     where
         Expecter: Send + Sync + Fn(Signature) -> Fut,
-        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Tx,
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
+        Tx: SerializableTransaction + Send + Sync,
     {
         self.resend_transaction_with_config_with_custom_expectant(
             transaction_builder,
@@ -101,6 +107,7 @@ pub trait AsyncSendTransaction {
         Expecter,
         Fut,
         TxStatus,
+        Tx,
     >(
         &self,
         transaction_builder: TransactionBuilder,
@@ -111,7 +118,8 @@ pub trait AsyncSendTransaction {
     ) -> Result<(Signature, TxStatus), ClientError>
     where
         Expecter: Send + Sync + Fn(Signature) -> Fut,
-        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Tx,
+        Tx: SerializableTransaction + Send + Sync,
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
     {
@@ -315,7 +323,7 @@ impl AsyncSendTransactionWithSimpleStatus for RpcClient {
 }
 #[async_trait]
 pub trait AsyncResendTransactionWithSimpleStatus: AsyncSendTransaction {
-    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder>(
+    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder, Tx>(
         &self,
         transaction_builder: TransactionBuilder,
         config: RpcSendTransactionConfig,
@@ -323,15 +331,17 @@ pub trait AsyncResendTransactionWithSimpleStatus: AsyncSendTransaction {
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
-        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction;
-    async fn resend_transaction_with_simple_status<TransactionBuilder>(
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Tx,
+        Tx: SerializableTransaction + Send + Sync;
+    async fn resend_transaction_with_simple_status<TransactionBuilder, Tx>(
         &self,
         transaction_builder: TransactionBuilder,
         send_ctx: SendContext,
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
-        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Tx,
+        Tx: SerializableTransaction + Send + Sync,
     {
         self.resend_transaction_with_config_with_simple_status(
             transaction_builder,
@@ -345,7 +355,7 @@ pub trait AsyncResendTransactionWithSimpleStatus: AsyncSendTransaction {
 
 #[async_trait]
 impl AsyncResendTransactionWithSimpleStatus for RpcClient {
-    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder>(
+    async fn resend_transaction_with_config_with_simple_status<TransactionBuilder, Tx>(
         &self,
         transaction_builder: TransactionBuilder,
         config: RpcSendTransactionConfig,
@@ -353,7 +363,8 @@ impl AsyncResendTransactionWithSimpleStatus for RpcClient {
         resend_count: usize,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>
     where
-        TransactionBuilder: Send + Sync + Fn(Hash) -> Transaction,
+        TransactionBuilder: Send + Sync + Fn(Hash) -> Tx,
+        Tx: SerializableTransaction + Send + Sync,
     {
         self.resend_transaction_with_config_with_custom_expectant(
             transaction_builder,
