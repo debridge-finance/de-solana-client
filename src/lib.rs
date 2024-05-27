@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use itertools::{FoldWhile, Itertools};
 pub use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_client::SerializableTransaction;
 use solana_client::{
     client_error::ClientError,
     rpc_client::GetConfirmedSignaturesForAddress2Config,
@@ -51,7 +52,7 @@ pub trait AsyncSendTransaction {
 
     async fn send_transaction_with_config_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         config: RpcSendTransactionConfig,
         expectant: &Expecter,
         send_ctx: SendContext,
@@ -63,7 +64,7 @@ pub trait AsyncSendTransaction {
 
     async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         expectant: &Expecter,
         send_ctx: SendContext,
     ) -> Result<(Signature, TxStatus), ClientError>
@@ -150,7 +151,7 @@ impl AsyncSendTransaction for RpcClient {
 
     async fn send_transaction_with_config_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         config: RpcSendTransactionConfig,
         expectant: &Expecter,
         mut send_ctx: SendContext,
@@ -160,21 +161,17 @@ impl AsyncSendTransaction for RpcClient {
         TxStatus: Debug + Send,
         Fut: Send + Future<Output = Result<Option<TxStatus>, ClientError>>,
     {
-        let span = tracing::span!(
-            Level::TRACE,
-            "send ",
-            tx = format!("{:?}", transaction.signatures.first()).as_str()
-        );
+        let span = tracing::span!(Level::TRACE, "send ", tx = %transaction.get_signature());
         let _guard = span.enter();
         if send_ctx.blockhash_validation {
             tracing::trace!(
                 "Blockhash {} validation of transaction {:?} started",
-                transaction.message.recent_blockhash,
-                transaction
+                transaction.get_recent_blockhash(),
+                transaction.get_signature()
             );
             match self
                 .is_blockhash_valid(
-                    &transaction.message.recent_blockhash,
+                    transaction.get_recent_blockhash(),
                     CommitmentConfig::processed(),
                 )
                 .await
@@ -182,19 +179,21 @@ impl AsyncSendTransaction for RpcClient {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(RpcError::ForUser(format!(
-                        "Transaction {transaction:?} blockhash not found by rpc",
+                        "Transaction {} blockhash not found by rpc",
+                        transaction.get_signature(),
                     ))
                     .into())
                 }
                 Err(err) => {
                     tracing::error!(
-                        "Ignore error via blockhash request of {:?} transaction: {:?}. Error ignores left: {}",
-                        transaction,
+                        "Ignore error via blockhash request of {} transaction: {:?}. Error ignores left: {}",
+                        transaction.get_signature(),
                         err,
-                        send_ctx.ignorable_errors_count
+                        send_ctx.ignorable_errors_count,
                     );
                     return Err(RpcError::ForUser(format!(
-                        "Error via transaction {transaction:?} blockhash requesting",
+                        "Error via transaction {} blockhash requesting",
+                        transaction.get_signature(),
                     ))
                     .into());
                 }
@@ -252,7 +251,7 @@ impl AsyncSendTransaction for RpcClient {
 
     async fn send_transaction_with_custom_expectant<Expecter, Fut, TxStatus>(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         expectant: &Expecter,
         send_ctx: SendContext,
     ) -> Result<(Signature, TxStatus), ClientError>
@@ -275,7 +274,7 @@ impl AsyncSendTransaction for RpcClient {
 pub trait AsyncSendTransactionWithSimpleStatus: AsyncSendTransaction {
     async fn send_transaction_with_simple_status(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         send_ctx: SendContext,
     ) -> Result<(Signature, Option<TransactionError>), ClientError> {
         self.send_transaction_with_config_with_simple_status(
@@ -288,7 +287,7 @@ pub trait AsyncSendTransactionWithSimpleStatus: AsyncSendTransaction {
 
     async fn send_transaction_with_config_with_simple_status(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         config: RpcSendTransactionConfig,
         send_ctx: SendContext,
     ) -> Result<(Signature, Option<TransactionError>), ClientError>;
@@ -298,7 +297,7 @@ pub trait AsyncSendTransactionWithSimpleStatus: AsyncSendTransaction {
 impl AsyncSendTransactionWithSimpleStatus for RpcClient {
     async fn send_transaction_with_config_with_simple_status(
         &self,
-        transaction: Transaction,
+        transaction: impl SerializableTransaction + Send + Sync,
         config: RpcSendTransactionConfig,
         send_ctx: SendContext,
     ) -> Result<(Signature, Option<TransactionError>), ClientError> {
